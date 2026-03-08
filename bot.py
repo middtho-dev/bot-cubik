@@ -66,6 +66,11 @@ async def safe_delete_message(message: Message | None) -> None:
         await message.delete()
 
 
+async def wait_for_dice_animation() -> None:
+    # Даем анимации кубика завершиться, чтобы ответ приходил после визуального броска.
+    await asyncio.sleep(4)
+
+
 async def open_or_update_main_menu(
     callback: CallbackQuery | None,
     message: Message,
@@ -194,6 +199,7 @@ def build_router(db: Database) -> Router:
 
         await callback.answer()
         dice_message = await callback.message.answer_dice(emoji="🎲")
+        await wait_for_dice_animation()
         dice_value = dice_message.dice.value if dice_message.dice else None
 
         if dice_value is None:
@@ -206,7 +212,7 @@ def build_router(db: Database) -> Router:
             await db.set_passed(user.id, True)
             result = "🎉 Выпало 4! Вы проходите дальше."
         else:
-            result = f"Выпало {dice_value}. Нужно 4, чтобы пройти дальше."
+            result = "Попробуйте еще раз."
 
         await callback.message.answer(result)
         await open_or_update_main_menu(None, callback.message, db)
@@ -255,7 +261,7 @@ def build_router(db: Database) -> Router:
             await db.set_passed(user.id, True)
             await message.answer("🎉 Ваш кубик: 4! Вы проходите дальше.")
         else:
-            await message.answer(f"Ваш кубик: {value}. Нужно 4, чтобы пройти дальше.")
+            await message.answer("Попробуйте еще раз.")
 
         await open_or_update_main_menu(None, message, db)
 
