@@ -32,6 +32,8 @@ class Database:
                 first_name TEXT,
                 agreed_to_rules INTEGER NOT NULL DEFAULT 0,
                 rules_status TEXT NOT NULL DEFAULT 'pending',
+                selected_mode TEXT,
+                last_request TEXT,
                 telegram_roll INTEGER,
                 user_roll INTEGER,
                 passed INTEGER NOT NULL DEFAULT 0,
@@ -56,6 +58,10 @@ class Database:
             await self.conn.execute("ALTER TABLE users ADD COLUMN last_rules_message_id INTEGER")
         if "last_menu_message_id" not in columns:
             await self.conn.execute("ALTER TABLE users ADD COLUMN last_menu_message_id INTEGER")
+        if "selected_mode" not in columns:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN selected_mode TEXT")
+        if "last_request" not in columns:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN last_request TEXT")
 
     async def upsert_user(self, user_id: int, username: str | None, first_name: str | None) -> None:
         await self.conn.execute(
@@ -100,42 +106,51 @@ class Database:
         await self.conn.commit()
 
     async def has_agreed(self, user_id: int) -> bool:
-        cursor = await self.conn.execute(
-            "SELECT agreed_to_rules FROM users WHERE user_id=?",
-            (user_id,),
-        )
+        cursor = await self.conn.execute("SELECT agreed_to_rules FROM users WHERE user_id=?", (user_id,))
         row = await cursor.fetchone()
         return bool(row["agreed_to_rules"]) if row else False
 
+    async def has_passed(self, user_id: int) -> bool:
+        cursor = await self.conn.execute("SELECT passed FROM users WHERE user_id=?", (user_id,))
+        row = await cursor.fetchone()
+        return bool(row["passed"]) if row else False
+
+    async def get_selected_mode(self, user_id: int) -> str | None:
+        cursor = await self.conn.execute("SELECT selected_mode FROM users WHERE user_id=?", (user_id,))
+        row = await cursor.fetchone()
+        return row["selected_mode"] if row else None
+
+    async def set_selected_mode(self, user_id: int, mode: str) -> None:
+        await self.conn.execute(
+            "UPDATE users SET selected_mode=?, updated_at=CURRENT_TIMESTAMP WHERE user_id=?",
+            (mode, user_id),
+        )
+        await self.conn.commit()
+
+    async def save_request(self, user_id: int, request_text: str) -> None:
+        await self.conn.execute(
+            "UPDATE users SET last_request=?, updated_at=CURRENT_TIMESTAMP WHERE user_id=?",
+            (request_text, user_id),
+        )
+        await self.conn.commit()
+
     async def save_telegram_roll(self, user_id: int, value: int) -> None:
         await self.conn.execute(
-            """
-            UPDATE users
-            SET telegram_roll=?, updated_at=CURRENT_TIMESTAMP
-            WHERE user_id=?
-            """,
+            "UPDATE users SET telegram_roll=?, updated_at=CURRENT_TIMESTAMP WHERE user_id=?",
             (value, user_id),
         )
         await self.conn.commit()
 
     async def save_user_roll(self, user_id: int, value: int) -> None:
         await self.conn.execute(
-            """
-            UPDATE users
-            SET user_roll=?, updated_at=CURRENT_TIMESTAMP
-            WHERE user_id=?
-            """,
+            "UPDATE users SET user_roll=?, updated_at=CURRENT_TIMESTAMP WHERE user_id=?",
             (value, user_id),
         )
         await self.conn.commit()
 
     async def set_passed(self, user_id: int, passed: bool) -> None:
         await self.conn.execute(
-            """
-            UPDATE users
-            SET passed=?, updated_at=CURRENT_TIMESTAMP
-            WHERE user_id=?
-            """,
+            "UPDATE users SET passed=?, updated_at=CURRENT_TIMESTAMP WHERE user_id=?",
             (1 if passed else 0, user_id),
         )
         await self.conn.commit()
@@ -148,10 +163,7 @@ class Database:
         await self.conn.commit()
 
     async def get_last_menu_message_id(self, user_id: int) -> int | None:
-        cursor = await self.conn.execute(
-            "SELECT last_menu_message_id FROM users WHERE user_id=?",
-            (user_id,),
-        )
+        cursor = await self.conn.execute("SELECT last_menu_message_id FROM users WHERE user_id=?", (user_id,))
         row = await cursor.fetchone()
         return row["last_menu_message_id"] if row else None
 

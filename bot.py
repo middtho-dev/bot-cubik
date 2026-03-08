@@ -1,8 +1,8 @@
 import asyncio
 import logging
 import os
-from dataclasses import dataclass
 from contextlib import suppress
+from dataclasses import dataclass
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -16,8 +16,11 @@ from dotenv import load_dotenv
 from db import Database
 
 
-class UserRollState(StatesGroup):
-    waiting_for_roll = State()
+class GameState(StatesGroup):
+    waiting_tg_request = State()
+    waiting_tg_roll = State()
+    waiting_user_request = State()
+    waiting_user_roll = State()
 
 
 @dataclass
@@ -31,10 +34,7 @@ def load_settings() -> Settings:
     token = os.getenv("BOT_TOKEN", "")
     if not token:
         raise RuntimeError("BOT_TOKEN is not set. Add it to .env or environment variables.")
-    return Settings(
-        bot_token=token,
-        db_path=os.getenv("DB_PATH", "bot.db"),
-    )
+    return Settings(bot_token=token, db_path=os.getenv("DB_PATH", "bot.db"))
 
 
 def rules_keyboard():
@@ -47,16 +47,26 @@ def rules_keyboard():
 
 def main_menu_keyboard():
     kb = InlineKeyboardBuilder()
-    kb.button(text="🎲 Бросить кубик Telegram", callback_data="menu:roll_tg")
-    kb.button(text="✍️ Бросить свой кубик", callback_data="menu:roll_user")
+    kb.button(text="🎲 Выбрать Telegram-кубик", callback_data="menu:choose_tg")
+    kb.button(text="✍️ Выбрать свой кубик", callback_data="menu:choose_user")
     kb.adjust(1)
     return kb.as_markup()
 
 
-def cancel_roll_keyboard():
+def tg_roll_keyboard():
     kb = InlineKeyboardBuilder()
-    kb.button(text="↩️ Назад в меню", callback_data="menu:open")
+    kb.button(text="🎲 Бросить кубик", callback_data="game:tg_roll")
     return kb.as_markup()
+
+
+def back_menu_keyboard():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="↩️ В главное меню", callback_data="menu:open")
+    return kb.as_markup()
+
+
+def mode_title(mode: str) -> str:
+    return "Telegram-кубик" if mode == "telegram" else "Свой кубик"
 
 
 async def safe_delete_message(message: Message | None) -> None:
@@ -67,18 +77,25 @@ async def safe_delete_message(message: Message | None) -> None:
 
 
 async def wait_for_dice_animation() -> None:
-    # Даем анимации кубика завершиться, чтобы ответ приходил после визуального броска.
     await asyncio.sleep(4)
 
 
-async def open_or_update_main_menu(
-    callback: CallbackQuery | None,
-    message: Message,
-    db: Database,
-    text: str = "Главное меню:",
-) -> None:
-    user = message.from_user if callback is None else callback.from_user
+async def open_or_update_main_menu(callback: CallbackQuery | None, message: Message, db: Database, text: str = "Главное меню:") -> None:
+    user = callback.from_user if callback else message.from_user
     if user is None:
+        return
+
+    selected_mode = await db.get_selected_mode(user.id)
+    passed = await db.has_passed(user.id)
+
+    if selected_mode and not passed:
+        locked_text = f"Вы уже выбрали режим: {mode_title(selected_mode)}. Выбор зафиксирован до попадания в игру."
+        if callback:
+            with suppress(TelegramBadRequest):
+                await callback.message.edit_text(locked_text)
+            await callback.answer()
+        else:
+            await message.answer(locked_text)
         return
 
     last_menu_id = await db.get_last_menu_message_id(user.id)
@@ -117,11 +134,11 @@ def build_router(db: Database) -> Router:
         if user is None:
             return
 
-        await db.upsert_user(
-            user_id=user.id,
-            username=user.username,
-            first_name=user.first_name,
-        )
+        await db.upsert_user(user.id, user.username, user.first_name)
+
+        if await db.has_passed(user.id):
+            await message.answer("🎮 Вы уже в игре.")
+            return
 
         status = await db.get_rules_status(user.id)
         if status == "agreed":
@@ -132,29 +149,25 @@ def build_router(db: Database) -> Router:
             "👋 Добро пожаловать!\n\n"
             "📜 Правила:\n"
             "1. Нажмите «Согласиться», чтобы продолжить.\n"
-            "2. В главном меню доступны 2 действия:\n"
-            "   • «Бросить кубик Telegram» — бот отправит анимированный кубик.\n"
-            "   • «Бросить свой кубик» — вы вводите число от 1 до 6.\n"
-            "3. Если на кубике Telegram или на вашем кубике выпадает число 4, бот пропускает вас дальше."
+            "2. Выберите один тип кубика (выбор фиксируется до попадания в игру).\n"
+            "3. Бот просит ввести запрос перед каждым броском.\n"
+            "4. Если выпало не 4 — бот попросит ввести другой запрос."
         )
-
         msg = await message.answer(rules_text, reply_markup=rules_keyboard())
         await db.set_last_rules_message_id(user.id, msg.message_id)
 
     @router.callback_query(F.data == "rules:agree")
     async def agree_rules(callback: CallbackQuery, state: FSMContext):
         await state.clear()
-        user = callback.from_user
-        if user is None or callback.message is None:
+        if callback.from_user is None or callback.message is None:
             return
 
-        status = await db.get_rules_status(user.id)
-        if status == "agreed":
-            await callback.answer("Выбор уже зафиксирован", show_alert=False)
-            await open_or_update_main_menu(callback, callback.message, db, "✅ Вы уже согласились с правилами. Главное меню открыто.")
+        user_id = callback.from_user.id
+        if await db.get_rules_status(user_id) == "agreed":
+            await callback.answer("Выбор уже зафиксирован")
             return
 
-        await db.set_rules_agreement(user.id, True)
+        await db.set_rules_agreement(user_id, True)
         with suppress(TelegramBadRequest):
             await callback.message.edit_text("✅ Вы согласились с правилами. Главное меню открыто.")
 
@@ -164,16 +177,15 @@ def build_router(db: Database) -> Router:
     @router.callback_query(F.data == "rules:decline")
     async def decline_rules(callback: CallbackQuery, state: FSMContext):
         await state.clear()
-        user = callback.from_user
-        if user is None or callback.message is None:
+        if callback.from_user is None or callback.message is None:
             return
 
-        status = await db.get_rules_status(user.id)
-        if status == "agreed":
+        user_id = callback.from_user.id
+        if await db.get_rules_status(user_id) == "agreed":
             await callback.answer("После согласия изменить выбор нельзя", show_alert=True)
             return
 
-        await db.set_rules_agreement(user.id, False)
+        await db.set_rules_agreement(user_id, False)
         with suppress(TelegramBadRequest):
             await callback.message.edit_text("❌ Вы отказались от правил. Для повторного показа нажмите /start.")
         await callback.answer("Отказ сохранен")
@@ -185,59 +197,103 @@ def build_router(db: Database) -> Router:
             return
         await open_or_update_main_menu(callback, callback.message, db)
 
-    @router.callback_query(F.data == "menu:roll_tg")
-    async def roll_telegram_dice(callback: CallbackQuery, state: FSMContext):
-        await state.clear()
-        user = callback.from_user
-        if user is None or callback.message is None:
+    @router.callback_query(F.data.in_({"menu:choose_tg", "menu:choose_user"}))
+    async def choose_mode(callback: CallbackQuery, state: FSMContext):
+        if callback.from_user is None or callback.message is None:
             return
 
-        is_agreed = await db.has_agreed(user.id)
-        if not is_agreed:
+        user_id = callback.from_user.id
+        if not await db.has_agreed(user_id):
             await callback.answer("Сначала примите правила через /start.", show_alert=True)
+            return
+
+        selected_mode = await db.get_selected_mode(user_id)
+        requested_mode = "telegram" if callback.data == "menu:choose_tg" else "user"
+
+        if selected_mode and selected_mode != requested_mode:
+            await callback.answer(f"Вы уже выбрали режим: {mode_title(selected_mode)}", show_alert=True)
+            return
+
+        await db.set_selected_mode(user_id, requested_mode)
+        await state.clear()
+
+        if requested_mode == "telegram":
+            await state.set_state(GameState.waiting_tg_request)
+        else:
+            await state.set_state(GameState.waiting_user_request)
+
+        with suppress(TelegramBadRequest):
+            await callback.message.edit_text(
+                f"Режим: {mode_title(requested_mode)}.\nВведите ваш запрос:",
+                reply_markup=back_menu_keyboard(),
+            )
+        await callback.answer("Режим выбран")
+
+    @router.message(GameState.waiting_tg_request)
+    async def handle_tg_request(message: Message, state: FSMContext):
+        user = message.from_user
+        if user is None:
+            return
+
+        request_text = (message.text or "").strip()
+        await safe_delete_message(message)
+        if not request_text:
+            await message.answer("Введите текст запроса.")
+            return
+
+        await db.save_request(user.id, request_text)
+        await state.set_state(GameState.waiting_tg_roll)
+        await message.answer("Запрос принят. Нажмите кнопку, чтобы бросить кубик.", reply_markup=tg_roll_keyboard())
+
+    @router.callback_query(F.data == "game:tg_roll")
+    async def tg_roll(callback: CallbackQuery, state: FSMContext):
+        if callback.from_user is None or callback.message is None:
+            return
+
+        user_id = callback.from_user.id
+        current_state = await state.get_state()
+        if current_state != GameState.waiting_tg_roll.state:
+            await callback.answer("Сначала введите запрос.", show_alert=True)
             return
 
         await callback.answer()
         dice_message = await callback.message.answer_dice(emoji="🎲")
         await wait_for_dice_animation()
-        dice_value = dice_message.dice.value if dice_message.dice else None
 
+        dice_value = dice_message.dice.value if dice_message.dice else None
         if dice_value is None:
             await callback.message.answer("Не удалось получить значение кубика. Попробуйте еще раз.")
             return
 
-        await db.save_telegram_roll(user.id, dice_value)
+        await db.save_telegram_roll(user_id, dice_value)
 
         if dice_value == 4:
-            await db.set_passed(user.id, True)
-            result = "🎉 Выпало 4! Вы проходите дальше."
-        else:
-            result = "Попробуйте еще раз."
-
-        await callback.message.answer(result)
-        await open_or_update_main_menu(None, callback.message, db)
-
-    @router.callback_query(F.data == "menu:roll_user")
-    async def ask_user_roll(callback: CallbackQuery, state: FSMContext):
-        user = callback.from_user
-        if user is None or callback.message is None:
+            await db.set_passed(user_id, True)
+            await state.clear()
+            await callback.message.answer("🎉 Выпало 4! Вы попали в игру.")
             return
 
-        is_agreed = await db.has_agreed(user.id)
-        if not is_agreed:
-            await callback.answer("Сначала примите правила через /start.", show_alert=True)
+        await state.set_state(GameState.waiting_tg_request)
+        await callback.message.answer("Попробуйте еще раз. Введите другой запрос:", reply_markup=back_menu_keyboard())
+
+    @router.message(GameState.waiting_user_request)
+    async def handle_user_request(message: Message, state: FSMContext):
+        user = message.from_user
+        if user is None:
             return
 
-        await state.set_state(UserRollState.waiting_for_roll)
-        with suppress(TelegramBadRequest):
-            await callback.message.edit_text(
-                "Введите число от 1 до 6:",
-                reply_markup=cancel_roll_keyboard(),
-            )
-        await callback.answer()
+        request_text = (message.text or "").strip()
+        await safe_delete_message(message)
+        if not request_text:
+            await message.answer("Введите текст запроса.")
+            return
 
-    @router.message(UserRollState.waiting_for_roll)
-    async def get_user_roll(message: Message, state: FSMContext):
+        await db.save_request(user.id, request_text)
+        await state.set_state(GameState.waiting_user_roll)
+        await message.answer("Теперь введите число с вашего кубика (1-6):", reply_markup=back_menu_keyboard())
+
+    @router.message(GameState.waiting_user_roll)
+    async def handle_user_roll(message: Message, state: FSMContext):
         user = message.from_user
         if user is None:
             return
@@ -245,25 +301,21 @@ def build_router(db: Database) -> Router:
         text = (message.text or "").strip()
         await safe_delete_message(message)
 
-        if not text.isdigit():
-            await message.answer("Нужно ввести число от 1 до 6.")
+        if not text.isdigit() or not (1 <= int(text) <= 6):
+            await message.answer("Введите число от 1 до 6.")
             return
 
         value = int(text)
-        if value < 1 or value > 6:
-            await message.answer("Число должно быть от 1 до 6.")
-            return
-
         await db.save_user_roll(user.id, value)
-        await state.clear()
 
         if value == 4:
             await db.set_passed(user.id, True)
-            await message.answer("🎉 Ваш кубик: 4! Вы проходите дальше.")
-        else:
-            await message.answer("Попробуйте еще раз.")
+            await state.clear()
+            await message.answer("🎉 Выпало 4! Вы попали в игру.")
+            return
 
-        await open_or_update_main_menu(None, message, db)
+        await state.set_state(GameState.waiting_user_request)
+        await message.answer("Попробуйте еще раз. Введите другой запрос:", reply_markup=back_menu_keyboard())
 
     return router
 
