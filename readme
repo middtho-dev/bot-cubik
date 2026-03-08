@@ -1,1 +1,48 @@
+# Telegram-бот на aiogram 3
 
+Текущая логика:
+
+- `/start` показывает правила и inline-кнопки «Согласиться / Отказаться».
+- После согласия открывается inline-меню выбора кубика:
+  - `🎲 Выбрать Telegram-кубик`
+  - `✍️ Выбрать свой кубик`
+- После выбора режима бот **фиксирует выбор** до попадания в игру.
+- В обоих режимах перед попыткой бот просит ввести запрос.
+- Если выпало не `4`, бот пишет «Попробуйте еще раз. Введите другой запрос:».
+- Если выпало `4`, пользователь попадает в игру.
+- Все данные сохраняются в SQLite.
+
+## Установка
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
+Заполните `.env`:
+
+```dotenv
+BOT_TOKEN=ваш_токен_от_BotFather
+DB_PATH=bot.db
+```
+
+## Запуск
+
+```bash
+python bot.py
+```
+
+## Как обновиться с GitHub
+
+Репозиторий: `https://github.com/middtho-dev/bot-cubik`
+
+```bash
+cd /путь/к/папке/bot-cubik
+git fetch origin
+git pull origin main
+source .venv/bin/activate
+pip install -r requirements.txt
+python bot.py
+```
