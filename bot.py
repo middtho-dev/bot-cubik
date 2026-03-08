@@ -59,12 +59,6 @@ def tg_roll_keyboard():
     return kb.as_markup()
 
 
-def back_menu_keyboard():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="↩️ В главное меню", callback_data="menu:open")
-    return kb.as_markup()
-
-
 def mode_title(mode: str) -> str:
     return "Telegram-кубик" if mode == "telegram" else "Свой кубик"
 
@@ -223,10 +217,9 @@ def build_router(db: Database) -> Router:
             await state.set_state(GameState.waiting_user_request)
 
         with suppress(TelegramBadRequest):
-            await callback.message.edit_text(
-                f"Режим: {mode_title(requested_mode)}.\nВведите ваш запрос:",
-                reply_markup=back_menu_keyboard(),
-            )
+            await callback.message.edit_text(f"Режим: {mode_title(requested_mode)}.")
+
+        await callback.message.answer("Введите ваш запрос:")
         await callback.answer("Режим выбран")
 
     @router.message(GameState.waiting_tg_request)
@@ -256,6 +249,10 @@ def build_router(db: Database) -> Router:
             await callback.answer("Сначала введите запрос.", show_alert=True)
             return
 
+        request_text = await db.get_last_request(user_id)
+        with suppress(TelegramBadRequest):
+            await callback.message.edit_text(f"Ваш вопрос:\n{request_text or '—'}")
+
         await callback.answer()
         dice_message = await callback.message.answer_dice(emoji="🎲")
         await wait_for_dice_animation()
@@ -274,7 +271,7 @@ def build_router(db: Database) -> Router:
             return
 
         await state.set_state(GameState.waiting_tg_request)
-        await callback.message.answer("Попробуйте еще раз. Введите другой запрос:", reply_markup=back_menu_keyboard())
+        await callback.message.answer("Попробуйте еще раз. Введите другой запрос:")
 
     @router.message(GameState.waiting_user_request)
     async def handle_user_request(message: Message, state: FSMContext):
@@ -290,7 +287,7 @@ def build_router(db: Database) -> Router:
 
         await db.save_request(user.id, request_text)
         await state.set_state(GameState.waiting_user_roll)
-        await message.answer("Теперь введите число с вашего кубика (1-6):", reply_markup=back_menu_keyboard())
+        await message.answer("Теперь введите число с вашего кубика (1-6):")
 
     @router.message(GameState.waiting_user_roll)
     async def handle_user_roll(message: Message, state: FSMContext):
@@ -315,7 +312,7 @@ def build_router(db: Database) -> Router:
             return
 
         await state.set_state(GameState.waiting_user_request)
-        await message.answer("Попробуйте еще раз. Введите другой запрос:", reply_markup=back_menu_keyboard())
+        await message.answer("Попробуйте еще раз. Введите другой запрос:")
 
     return router
 

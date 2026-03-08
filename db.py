@@ -127,6 +127,12 @@ class Database:
         )
         await self.conn.commit()
 
+
+    async def get_last_request(self, user_id: int) -> str | None:
+        cursor = await self.conn.execute("SELECT last_request FROM users WHERE user_id=?", (user_id,))
+        row = await cursor.fetchone()
+        return row["last_request"] if row else None
+
     async def save_request(self, user_id: int, request_text: str) -> None:
         await self.conn.execute(
             "UPDATE users SET last_request=?, updated_at=CURRENT_TIMESTAMP WHERE user_id=?",
