@@ -31,15 +31,31 @@ class Database:
                 username TEXT,
                 first_name TEXT,
                 agreed_to_rules INTEGER NOT NULL DEFAULT 0,
+                rules_status TEXT NOT NULL DEFAULT 'pending',
                 telegram_roll INTEGER,
                 user_roll INTEGER,
                 passed INTEGER NOT NULL DEFAULT 0,
+                last_rules_message_id INTEGER,
+                last_menu_message_id INTEGER,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+
+        await self._migrate_users_table()
         await self.conn.commit()
+
+    async def _migrate_users_table(self) -> None:
+        cursor = await self.conn.execute("PRAGMA table_info(users)")
+        columns = {row["name"] for row in await cursor.fetchall()}
+
+        if "rules_status" not in columns:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN rules_status TEXT NOT NULL DEFAULT 'pending'")
+        if "last_rules_message_id" not in columns:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN last_rules_message_id INTEGER")
+        if "last_menu_message_id" not in columns:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN last_menu_message_id INTEGER")
 
     async def upsert_user(self, user_id: int, username: str | None, first_name: str | None) -> None:
         await self.conn.execute(
@@ -55,14 +71,31 @@ class Database:
         )
         await self.conn.commit()
 
+    async def get_rules_status(self, user_id: int) -> str:
+        cursor = await self.conn.execute(
+            "SELECT rules_status, agreed_to_rules FROM users WHERE user_id=?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return "pending"
+        if row["rules_status"]:
+            return row["rules_status"]
+        return "agreed" if row["agreed_to_rules"] else "pending"
+
     async def set_rules_agreement(self, user_id: int, agreed: bool) -> None:
+        current_status = await self.get_rules_status(user_id)
+        if current_status == "agreed":
+            return
+
+        status = "agreed" if agreed else "declined"
         await self.conn.execute(
             """
             UPDATE users
-            SET agreed_to_rules=?, updated_at=CURRENT_TIMESTAMP
+            SET agreed_to_rules=?, rules_status=?, updated_at=CURRENT_TIMESTAMP
             WHERE user_id=?
             """,
-            (1 if agreed else 0, user_id),
+            (1 if agreed else 0, status, user_id),
         )
         await self.conn.commit()
 
@@ -104,5 +137,27 @@ class Database:
             WHERE user_id=?
             """,
             (1 if passed else 0, user_id),
+        )
+        await self.conn.commit()
+
+    async def set_last_rules_message_id(self, user_id: int, message_id: int) -> None:
+        await self.conn.execute(
+            "UPDATE users SET last_rules_message_id=?, updated_at=CURRENT_TIMESTAMP WHERE user_id=?",
+            (message_id, user_id),
+        )
+        await self.conn.commit()
+
+    async def get_last_menu_message_id(self, user_id: int) -> int | None:
+        cursor = await self.conn.execute(
+            "SELECT last_menu_message_id FROM users WHERE user_id=?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return row["last_menu_message_id"] if row else None
+
+    async def set_last_menu_message_id(self, user_id: int, message_id: int) -> None:
+        await self.conn.execute(
+            "UPDATE users SET last_menu_message_id=?, updated_at=CURRENT_TIMESTAMP WHERE user_id=?",
+            (message_id, user_id),
         )
         await self.conn.commit()
